@@ -51,7 +51,7 @@ Use this dependency in your Java/Mule Applications
 Add this java package in your top level log4j2 configuration element
 
 ```
-<Configuration packages="com.java.naisla.log4j2.cloudwatch">
+<Configuration packages="com.java.javacodegeeks.log4j2.cloudwatch">
 ```
 
 Add this custom appender to your Root logger in log4j2.xml.
