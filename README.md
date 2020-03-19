@@ -12,7 +12,7 @@ Why?
 ====================
 
 * When using MuleSoft CloudHub, you may want to store the logs somewhere other than in CloudHub.
-* Send all log events this CloudWatch instance 
+* Send all log events to a specified CloudWatch instance 
 * To make a backup copy for application logs.
 
 How?
@@ -70,4 +70,4 @@ Add this custom appender to your Root logger in log4j2.xml.
 
 * That's it!
 
-When you run the project with this appender added with your AWS credentials, you should the see your app logs flowing into the specified CloudWatch group.
+When you run the project with this appender added with your AWS credentials, you should see your app log events flowing into the configured CloudWatch group/logStreamName.
