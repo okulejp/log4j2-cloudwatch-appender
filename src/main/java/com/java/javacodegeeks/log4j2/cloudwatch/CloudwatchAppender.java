@@ -106,8 +106,8 @@ public class CloudwatchAppender extends AbstractAppender {
 	                           final String awsRegion,
 	                           Integer queueLength,
 	                           Integer messagesBatchSize,
-							   String endpoint
-							   ) {
+	                           String endpoint
+	                           ) {
 	        super(name, filter, layout, ignoreExceptions);
 	        this.logGroupName = logGroupName;
 	        this.logStreamName = logStreamName;
@@ -116,7 +116,7 @@ public class CloudwatchAppender extends AbstractAppender {
 	        this.awsRegion = awsRegion;
 	        this.queueLength = queueLength;
 	        this.messagesBatchSize = messagesBatchSize;
-			this.endpoint = endpoint;
+	        this.endpoint = endpoint;
 	        this.activateOptions();
 	    }
 	 
@@ -134,15 +134,15 @@ public class CloudwatchAppender extends AbstractAppender {
 	            logger2.error("Could not initialise CloudwatchAppender because either or both LogGroupName(" + logGroupName + ") and LogStreamName(" + logStreamName + ") are null or empty");
 	            this.stop();
 	        } else {
-	        	//Credentials management could be customized
-				com.amazonaws.services.logs.AWSLogsClientBuilder clientBuilder = com.amazonaws.services.logs.AWSLogsClientBuilder.standard();
-				clientBuilder.setCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(this.awsAccessKey, this.awsAccessSecret)));
-				if (this.endpoint != null) {
-				 	clientBuilder.withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(this.endpoint, this.awsRegion));
-				} else {
-				 	clientBuilder.withRegion(Regions.fromName(awsRegion));
-				}
-	        	this.awsLogsClient = clientBuilder.build();
+	            //Credentials management could be customized
+	            com.amazonaws.services.logs.AWSLogsClientBuilder clientBuilder = com.amazonaws.services.logs.AWSLogsClientBuilder.standard();
+	            clientBuilder.setCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(this.awsAccessKey, this.awsAccessSecret)));
+	            if (this.endpoint != null) {
+	                 clientBuilder.withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(this.endpoint, this.awsRegion));
+	            } else {
+	                 clientBuilder.withRegion(Regions.fromName(awsRegion));
+	            }
+	            this.awsLogsClient = clientBuilder.build();
 	            loggingEventsQueue = new LinkedBlockingQueue<>(queueLength);
 	            try {
 	                initializeCloudwatchResources();
@@ -203,9 +203,9 @@ public class CloudwatchAppender extends AbstractAppender {
 	                        .collect(toList());
 	 
 	                if (!inputLogEvents.isEmpty()) {
-	                	
+	
 	                
-	                	PutLogEventsRequest putLogEventsRequest = new PutLogEventsRequest(
+	                    PutLogEventsRequest putLogEventsRequest = new PutLogEventsRequest(
 	                            logGroupName,
 	                            logStreamName,
 	                            inputLogEvents);
@@ -323,7 +323,7 @@ public class CloudwatchAppender extends AbstractAppender {
 	                                                   
 	                                                  @PluginAttribute(value = "messagesBatchSize") Integer messagesBatchSize,
 	                                                  @PluginAttribute(value = "endpoint") String endpoint
-													  )
+	                                                  )
 	    {
 	     return new CloudwatchAppender(name, layout, null, ignoreExceptions, logGroupName, logStreamName , awsAccessKey, awsSecretKey, awsRegion, queueLength,messagesBatchSize,endpoint);
 	    }
