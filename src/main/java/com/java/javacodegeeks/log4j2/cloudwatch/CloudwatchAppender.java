@@ -37,6 +37,7 @@ import com.amazonaws.services.logs.model.InputLogEvent;
 import com.amazonaws.services.logs.model.InvalidSequenceTokenException;
 import com.amazonaws.services.logs.model.PutLogEventsRequest;
 import com.amazonaws.services.logs.model.PutLogEventsResult;
+import com.amazonaws.client.builder.AwsClientBuilder;
  
 @Plugin(name = "CLOUDW", category = "Core", elementType = "appender", printObject = true)
 public class CloudwatchAppender extends AbstractAppender {
@@ -85,6 +86,7 @@ public class CloudwatchAppender extends AbstractAppender {
 	    private String awsAccessKey;
 	    private String awsAccessSecret;
 	    private String awsRegion;
+	    private String endpoint;
 	 
 	    /**
 	     * The maximum number of log entries to send in one go to the AWS Cloudwatch Log service
@@ -103,7 +105,9 @@ public class CloudwatchAppender extends AbstractAppender {
 	                           final String awsSecretKey,
 	                           final String awsRegion,
 	                           Integer queueLength,
-	                           Integer messagesBatchSize) {
+	                           Integer messagesBatchSize,
+							   String endpoint
+							   ) {
 	        super(name, filter, layout, ignoreExceptions);
 	        this.logGroupName = logGroupName;
 	        this.logStreamName = logStreamName;
@@ -112,6 +116,7 @@ public class CloudwatchAppender extends AbstractAppender {
 	        this.awsRegion = awsRegion;
 	        this.queueLength = queueLength;
 	        this.messagesBatchSize = messagesBatchSize;
+			this.endpoint = endpoint;
 	        this.activateOptions();
 	    }
 	 
@@ -130,7 +135,14 @@ public class CloudwatchAppender extends AbstractAppender {
 	            this.stop();
 	        } else {
 	        	//Credentials management could be customized
-	        	this.awsLogsClient = com.amazonaws.services.logs.AWSLogsClientBuilder.standard().withRegion(Regions.fromName(awsRegion)).withCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(this.awsAccessKey, this.awsAccessSecret))).build();
+				com.amazonaws.services.logs.AWSLogsClientBuilder clientBuilder = com.amazonaws.services.logs.AWSLogsClientBuilder.standard();
+				clientBuilder.setCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(this.awsAccessKey, this.awsAccessSecret)));
+				if (this.endpoint != null) {
+				 	clientBuilder.withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(this.endpoint, this.awsRegion));
+				} else {
+				 	clientBuilder.withRegion(Regions.fromName(awsRegion));
+				}
+	        	this.awsLogsClient = clientBuilder.build();
 	            loggingEventsQueue = new LinkedBlockingQueue<>(queueLength);
 	            try {
 	                initializeCloudwatchResources();
@@ -309,8 +321,10 @@ public class CloudwatchAppender extends AbstractAppender {
 	                                                  @PluginAttribute(value = "name") String name,
 	                                                  @PluginAttribute(value = "ignoreExceptions", defaultBoolean = false) Boolean ignoreExceptions,
 	                                                   
-	                                                  @PluginAttribute(value = "messagesBatchSize") Integer messagesBatchSize)
+	                                                  @PluginAttribute(value = "messagesBatchSize") Integer messagesBatchSize,
+	                                                  @PluginAttribute(value = "endpoint") String endpoint
+													  )
 	    {
-	     return new CloudwatchAppender(name, layout, null, ignoreExceptions, logGroupName, logStreamName , awsAccessKey, awsSecretKey, awsRegion, queueLength,messagesBatchSize);
+	     return new CloudwatchAppender(name, layout, null, ignoreExceptions, logGroupName, logStreamName , awsAccessKey, awsSecretKey, awsRegion, queueLength,messagesBatchSize,endpoint);
 	    }
 	}
