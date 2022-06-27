@@ -41,6 +41,7 @@ Use this dependency in your Java/Mule Applications
 		awsAccessKey="<your AWS access key>" 
         awsSecretKey="<your AWS secret key>"
 		awsRegion="<your AWS region>" 
+		endpoint="<your CloudWatch VPC Endpoint>" 
 		messagesBatchSize="5"
 		queueLength="100">
 		<PatternLayout
