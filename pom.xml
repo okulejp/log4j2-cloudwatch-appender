@@ -8,7 +8,7 @@
 	<properties>
 		<maven.compiler.source>1.8</maven.compiler.source>
 		<maven.compiler.target>1.8</maven.compiler.target>
-		<aws.sdk.version>1.11.737</aws.sdk.version>
+		<aws.sdk.version>1.12.125</aws.sdk.version>
 		<log4j.version>2.18.0</log4j.version>
 	</properties>
 	<dependencies>

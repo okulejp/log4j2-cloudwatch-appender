@@ -137,11 +137,15 @@ public class CloudwatchAppender extends AbstractAppender {
         } else {
             //Credentials management could be customized
             com.amazonaws.services.logs.AWSLogsClientBuilder clientBuilder = com.amazonaws.services.logs.AWSLogsClientBuilder.standard();
-            clientBuilder.setCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(this.awsAccessKey, this.awsAccessSecret)));
+            if (!isBlank(this.awsAccessKey) && !isBlank(this.awsAccessSecret)) {
+                clientBuilder.setCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(this.awsAccessKey, this.awsAccessSecret)));
+            }
             if (this.endpoint != null) {
                 clientBuilder.withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(this.endpoint, this.awsRegion));
             } else {
-                clientBuilder.withRegion(Regions.fromName(awsRegion));
+                if (!isBlank(awsRegion)) {
+                    clientBuilder.withRegion(Regions.fromName(awsRegion));
+                }
             }
             this.awsLogsClient = clientBuilder.build();
             loggingEventsQueue = new LinkedBlockingQueue<>(queueLength);
