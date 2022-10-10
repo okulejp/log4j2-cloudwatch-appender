@@ -24,6 +24,7 @@ import org.apache.logging.log4j.core.config.plugins.PluginAttribute;
 import org.apache.logging.log4j.core.config.plugins.PluginElement;
 import org.apache.logging.log4j.core.config.plugins.PluginFactory;
 
+import com.amazonaws.AmazonServiceException;
 import com.amazonaws.auth.AWSStaticCredentialsProvider;
 import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.regions.Regions;
@@ -48,9 +49,24 @@ public class CloudwatchAppender extends AbstractAppender {
      */
     private static final long serialVersionUID = 12321345L;
 
+    /**
+     * CloudWatch Logs quotas batch size 1MB({@value}Byte) (maximum). This quota can't be changed.
+     */
+    private static final int BATCH_MAX_SIZE_BYTE = 1048576;
+
+    /**
+     * The byte size of fixed message added to log messages
+     */
+    private static final int ADDITIONAL_MSG_BYTE_SIZE = 26;
+
+    /**
+     * CloudWatch Logs quotas event size 256KB({@value}Byte) (maximum). This quota can't be changed.
+     */
+    private static final int EVENT_MAX_SIZE_BYTE = 262144;
+
     private static Logger logger2 = LogManager.getLogger(CloudwatchAppender.class);
 
-    private final Boolean DEBUG_MODE = System.getProperty("log4j.debug") != null;
+	 private final Boolean DEBUG_MODE = System.getProperty("log4j.debug") != null;
 
     /**
      * Used to make sure that on close() our daemon thread isn't also trying to sendMessage()s
@@ -67,7 +83,7 @@ public class CloudwatchAppender extends AbstractAppender {
      */
     private AWSLogs awsLogsClient;
 
-    private AtomicReference lastSequenceToken = new AtomicReference<>();
+    private AtomicReference<String> lastSequenceToken = new AtomicReference<>();
 
     /**
      * The AWS Cloudwatch Log group name
@@ -90,9 +106,28 @@ public class CloudwatchAppender extends AbstractAppender {
     private String endpoint;
 
     /**
+     * The count of retries when error occurs.
+     */
+    private int retryCount;
+
+    /**
+     * The number of milliseconds to sleep when error occurs.
+     */
+    private long retrySleepMSec;
+
+    /**
      * The maximum number of log entries to send in one go to the AWS Cloudwatch Log service
      */
     private int messagesBatchSize = 128;
+
+    /**
+     * Whether to check the following CloudWatch Logs quotas.
+     * <table border="1">
+     * <tr>Event size:<td>256 KB (maximum). This quota can't be changed.</td></tr>
+     * <tr>PutLogEvents:<td>The maximum batch size of a PutLogEvents request is 1MB.</td></tr>
+     * </table>
+     */
+    private boolean logsQuotasSizeCheck;
 
     private AtomicBoolean cloudwatchAppenderInitialised = new AtomicBoolean(false);
 
@@ -107,7 +142,10 @@ public class CloudwatchAppender extends AbstractAppender {
                                final String awsRegion,
                                Integer queueLength,
                                Integer messagesBatchSize,
-                               String endpoint
+                               String endpoint,
+                               int retryCount,
+                               long retrySleepMSec,
+                               boolean logsQuotasSizeCheck
     ) {
         super(name, filter, layout, ignoreExceptions, Property.EMPTY_ARRAY);
         this.logGroupName = logGroupName;
@@ -118,13 +156,20 @@ public class CloudwatchAppender extends AbstractAppender {
         this.queueLength = queueLength;
         this.messagesBatchSize = messagesBatchSize;
         this.endpoint = endpoint;
+        this.retryCount = retryCount;
+        this.retrySleepMSec = retrySleepMSec;
+        this.logsQuotasSizeCheck = logsQuotasSizeCheck;
         this.activateOptions();
     }
 
     @Override
     public void append(LogEvent event) {
         if (cloudwatchAppenderInitialised.get()) {
-            loggingEventsQueue.offer(event.toImmutable());
+            if (!loggingEventsQueue.offer(event.toImmutable())) {
+                if (DEBUG_MODE) {
+                    System.err.println("Cloudwatch Logs for LogGroupName: " + logGroupName + " and LogStreamName: " + logStreamName + " not output because queue is full.");
+                }
+            }
         } else {
             // just do nothing
         }
@@ -183,63 +228,85 @@ public class CloudwatchAppender extends AbstractAppender {
         t.start();
     }
 
+    private void putLogEvents(List<InputLogEvent> logEvents, String nextSequenceToken, int retryCount) throws InterruptedException {
+        try {
+            PutLogEventsRequest putLogEventsRequest = new PutLogEventsRequest(
+                    logGroupName,
+                    logStreamName,
+                    logEvents);
+            putLogEventsRequest.setSequenceToken(nextSequenceToken);
+            PutLogEventsResult result = awsLogsClient.putLogEvents(putLogEventsRequest);
+            lastSequenceToken.set(result.getNextSequenceToken());
+        } catch (AmazonServiceException exception) {
+            boolean isSleep = false;
+            String sequenceToken = null;
+            if (exception instanceof InvalidSequenceTokenException) {
+                sequenceToken = ((InvalidSequenceTokenException) exception)
+                        .getExpectedSequenceToken();
+            } else if (exception instanceof DataAlreadyAcceptedException) {
+                sequenceToken = ((DataAlreadyAcceptedException) exception)
+                        .getExpectedSequenceToken();
+            } else {
+                isSleep = true;
+                sequenceToken = nextSequenceToken;
+            }
+            if (retryCount >= 1) {
+                if (DEBUG_MODE) {
+                    System.err.println("error retryCount:" + retryCount
+                            + "  message:" + exception.getErrorMessage()
+                            + "  class:" + exception.getClass().getName());
+                    exception.printStackTrace();
+                }
+                if (isSleep) {
+                    Thread.currentThread().sleep(retrySleepMSec);
+                }
+                putLogEvents(logEvents, sequenceToken, retryCount - 1);
+            } else {
+                throw exception;
+            }
+        }
+    }
+
     private void sendMessages() {
         synchronized (sendMessagesLock) {
-            LogEvent polledLoggingEvent;
+            LogEvent polledLoggingEvent = null;
             final Layout layout = getLayout();
-            List<LogEvent> loggingEvents = new ArrayList<>();
+            List<InputLogEvent> inputLogEvents = new ArrayList<>();
 
             try {
-
-                while ((polledLoggingEvent = (LogEvent) loggingEventsQueue.poll()) != null && loggingEvents.size() <= messagesBatchSize) {
-                    loggingEvents.add(polledLoggingEvent);
-                }
-
-                List inputLogEvents = loggingEvents.stream()
-                        .map(loggingEvent -> new InputLogEvent().withTimestamp(loggingEvent.getTimeMillis())
-                                .withMessage
-                                        (
-                                                layout == null ?
-                                                        loggingEvent.getMessage().getFormattedMessage() :
-                                                        new String(layout.toByteArray(loggingEvent), StandardCharsets.UTF_8)
-                                        )
-                        )
-                        .sorted(comparing(InputLogEvent::getTimestamp))
-                        .collect(toList());
-
-                if (!inputLogEvents.isEmpty()) {
-
-
-                    PutLogEventsRequest putLogEventsRequest = new PutLogEventsRequest(
-                            logGroupName,
-                            logStreamName,
-                            inputLogEvents);
-
-                    try {
-                        putLogEventsRequest.setSequenceToken((String) lastSequenceToken.get());
-                        PutLogEventsResult result = awsLogsClient.putLogEvents(putLogEventsRequest);
-                        lastSequenceToken.set(result.getNextSequenceToken());
-                    } catch (DataAlreadyAcceptedException dataAlreadyAcceptedExcepted) {
-
-                        putLogEventsRequest.setSequenceToken(dataAlreadyAcceptedExcepted.getExpectedSequenceToken());
-                        PutLogEventsResult result = awsLogsClient.putLogEvents(putLogEventsRequest);
-                        lastSequenceToken.set(result.getNextSequenceToken());
-                        if (DEBUG_MODE) {
-                            dataAlreadyAcceptedExcepted.printStackTrace();
+                int totalSizeByte = 0;
+                while (inputLogEvents.size() < messagesBatchSize && (polledLoggingEvent = loggingEventsQueue.peek()) != null) {
+                    String message = layout == null ?
+                            polledLoggingEvent.getMessage().getFormattedMessage():
+                            new String(layout.toByteArray(polledLoggingEvent), StandardCharsets.UTF_8);
+                    if (logsQuotasSizeCheck) {
+                        byte[] messageBytes = message.getBytes(StandardCharsets.UTF_8);
+                        if (messageBytes.length > EVENT_MAX_SIZE_BYTE - ADDITIONAL_MSG_BYTE_SIZE) {
+                            if (DEBUG_MODE) {
+                                System.err.println("The log message size exceeds CloudWatch Logs quotas event max size.");
+                            }
+                            loggingEventsQueue.poll();
+                            continue;
                         }
-                    } catch (InvalidSequenceTokenException invalidSequenceTokenException) {
-                        putLogEventsRequest.setSequenceToken(invalidSequenceTokenException.getExpectedSequenceToken());
-                        PutLogEventsResult result = awsLogsClient.putLogEvents(putLogEventsRequest);
-                        lastSequenceToken.set(result.getNextSequenceToken());
-                        if (DEBUG_MODE) {
-                            invalidSequenceTokenException.printStackTrace();
+                        totalSizeByte += messageBytes.length + ADDITIONAL_MSG_BYTE_SIZE;
+                        if (totalSizeByte > BATCH_MAX_SIZE_BYTE) {
+                            break;
                         }
                     }
+                    InputLogEvent inputLogEvent = new InputLogEvent().withTimestamp(polledLoggingEvent.getTimeMillis());
+                    inputLogEvent.setMessage(message);
+                    inputLogEvents.add(inputLogEvent);
+                    loggingEventsQueue.poll();
                 }
+                if (inputLogEvents.isEmpty()) {
+                    return;
+                }
+                inputLogEvents = inputLogEvents.stream().sorted(comparing(InputLogEvent::getTimestamp)).collect(toList());
+                putLogEvents(inputLogEvents, lastSequenceToken.get(), retryCount);
             } catch (Exception e) {
                 if (DEBUG_MODE) {
-                    logger2.error(" error inserting cloudwatch:", e);
-                    e.printStackTrace();
+					logger2.error(" error inserting cloudwatch:", e);
+					e.printStackTrace();
                 }
             }
         }
@@ -326,10 +393,14 @@ public class CloudwatchAppender extends AbstractAppender {
             @PluginAttribute(value = "awsRegion") String awsRegion,
             @PluginAttribute(value = "name") String name,
             @PluginAttribute(value = "ignoreExceptions", defaultBoolean = false) Boolean ignoreExceptions,
-
             @PluginAttribute(value = "messagesBatchSize") Integer messagesBatchSize,
-            @PluginAttribute(value = "endpoint") String endpoint
+            @PluginAttribute(value = "endpoint") String endpoint,
+            @PluginAttribute(value = "retryCount", defaultInt = 2) Integer retryCount,
+            @PluginAttribute(value = "retrySleepMSec", defaultLong = 5000) Long retrySleepMSec,
+            @PluginAttribute(value = "logsQuotasSizeCheck", defaultBoolean = false) Boolean logsQuotasSizeCheck
     ) {
-        return new CloudwatchAppender(name, layout, null, ignoreExceptions, logGroupName, logStreamName, awsAccessKey, awsSecretKey, awsRegion, queueLength, messagesBatchSize, endpoint);
+        return new CloudwatchAppender(name, layout, null, ignoreExceptions, logGroupName, logStreamName,
+                awsAccessKey, awsSecretKey, awsRegion, queueLength, messagesBatchSize, endpoint,
+                retryCount, retrySleepMSec, logsQuotasSizeCheck);
     }
 }
