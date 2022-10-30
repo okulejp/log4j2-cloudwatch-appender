@@ -228,27 +228,27 @@ public class CloudwatchAppender extends AbstractAppender {
         t.start();
     }
 
-    private void putLogEvents(List<InputLogEvent> logEvents, String nextSequenceToken, int retryCount) throws InterruptedException {
+    private void putLogEvents(List<InputLogEvent> logEvents, int retryCount) throws InterruptedException {
         try {
             PutLogEventsRequest putLogEventsRequest = new PutLogEventsRequest(
                     logGroupName,
                     logStreamName,
                     logEvents);
-            putLogEventsRequest.setSequenceToken(nextSequenceToken);
+            putLogEventsRequest.setSequenceToken(lastSequenceToken.get());
             PutLogEventsResult result = awsLogsClient.putLogEvents(putLogEventsRequest);
             lastSequenceToken.set(result.getNextSequenceToken());
         } catch (AmazonServiceException exception) {
             boolean isSleep = false;
-            String sequenceToken = null;
             if (exception instanceof InvalidSequenceTokenException) {
-                sequenceToken = ((InvalidSequenceTokenException) exception)
+                String sequenceToken = ((InvalidSequenceTokenException) exception)
                         .getExpectedSequenceToken();
+                lastSequenceToken.set(sequenceToken);
             } else if (exception instanceof DataAlreadyAcceptedException) {
-                sequenceToken = ((DataAlreadyAcceptedException) exception)
+                String sequenceToken = ((DataAlreadyAcceptedException) exception)
                         .getExpectedSequenceToken();
+                lastSequenceToken.set(sequenceToken);
             } else {
                 isSleep = true;
-                sequenceToken = nextSequenceToken;
             }
             if (retryCount >= 1) {
                 if (DEBUG_MODE) {
@@ -260,7 +260,7 @@ public class CloudwatchAppender extends AbstractAppender {
                 if (isSleep) {
                     Thread.currentThread().sleep(retrySleepMSec);
                 }
-                putLogEvents(logEvents, sequenceToken, retryCount - 1);
+                putLogEvents(logEvents, retryCount - 1);
             } else {
                 throw exception;
             }
@@ -302,7 +302,7 @@ public class CloudwatchAppender extends AbstractAppender {
                     return;
                 }
                 inputLogEvents = inputLogEvents.stream().sorted(comparing(InputLogEvent::getTimestamp)).collect(toList());
-                putLogEvents(inputLogEvents, lastSequenceToken.get(), retryCount);
+                putLogEvents(inputLogEvents, retryCount);
             } catch (Exception e) {
                 if (DEBUG_MODE) {
 					logger2.error(" error inserting cloudwatch:", e);
