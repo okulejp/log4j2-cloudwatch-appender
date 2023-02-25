@@ -46,7 +46,7 @@ Use this dependency in your Java/Mule Applications
 		queueLength="100"
 		retryCount="<your retry count when the error occurs (default 2)>"
 		retrySleepMSec="<your sleep millisecond when the error occurs (default 5000)>"/>
-		logsQuotasSizeCheck="<your logs quotas size check (default false)>"/>
+		logsQuotasSizeCheck="<your logs quotas size check (default true)>"/>
 		<PatternLayout
 			pattern="%-5p %d [%t] %X{correlationId}%c: %m%n" /> 
 	</CLOUDW>

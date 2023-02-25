@@ -383,7 +383,7 @@ public class CloudwatchAppender extends AbstractAppender {
             @PluginAttribute(value = "endpoint") String endpoint,
             @PluginAttribute(value = "retryCount", defaultInt = 2) Integer retryCount,
             @PluginAttribute(value = "retrySleepMSec", defaultLong = 5000) Long retrySleepMSec,
-            @PluginAttribute(value = "logsQuotasSizeCheck", defaultBoolean = false) Boolean logsQuotasSizeCheck
+            @PluginAttribute(value = "logsQuotasSizeCheck", defaultBoolean = true) Boolean logsQuotasSizeCheck
     ) {
         return new CloudwatchAppender(name, layout, null, ignoreExceptions, logGroupName, logStreamName,
                 awsAccessKey, awsSecretKey, awsRegion, queueLength, messagesBatchSize, endpoint,
