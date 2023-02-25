@@ -10,8 +10,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
+import com.amazonaws.SdkClientException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.core.Filter;
@@ -36,9 +36,7 @@ import com.amazonaws.services.logs.model.DataAlreadyAcceptedException;
 import com.amazonaws.services.logs.model.DescribeLogGroupsRequest;
 import com.amazonaws.services.logs.model.DescribeLogStreamsRequest;
 import com.amazonaws.services.logs.model.InputLogEvent;
-import com.amazonaws.services.logs.model.InvalidSequenceTokenException;
 import com.amazonaws.services.logs.model.PutLogEventsRequest;
-import com.amazonaws.services.logs.model.PutLogEventsResult;
 import com.amazonaws.client.builder.AwsClientBuilder;
 
 @Plugin(name = "CLOUDW", category = "Core", elementType = "appender", printObject = true)
@@ -66,7 +64,7 @@ public class CloudwatchAppender extends AbstractAppender {
 
     private static Logger logger2 = LogManager.getLogger(CloudwatchAppender.class);
 
-	 private final Boolean DEBUG_MODE = System.getProperty("log4j.debug") != null;
+     private final Boolean DEBUG_MODE = System.getProperty("log4j.debug") != null;
 
     /**
      * Used to make sure that on close() our daemon thread isn't also trying to sendMessage()s
@@ -82,8 +80,6 @@ public class CloudwatchAppender extends AbstractAppender {
      * the AWS Cloudwatch Logs API client
      */
     private AWSLogs awsLogsClient;
-
-    private AtomicReference<String> lastSequenceToken = new AtomicReference<>();
 
     /**
      * The AWS Cloudwatch Log group name
@@ -234,26 +230,16 @@ public class CloudwatchAppender extends AbstractAppender {
                     logGroupName,
                     logStreamName,
                     logEvents);
-            putLogEventsRequest.setSequenceToken(lastSequenceToken.get());
-            PutLogEventsResult result = awsLogsClient.putLogEvents(putLogEventsRequest);
-            lastSequenceToken.set(result.getNextSequenceToken());
-        } catch (AmazonServiceException exception) {
+            awsLogsClient.putLogEvents(putLogEventsRequest);
+        } catch (SdkClientException exception) {
             boolean isSleep = false;
-            if (exception instanceof InvalidSequenceTokenException) {
-                String sequenceToken = ((InvalidSequenceTokenException) exception)
-                        .getExpectedSequenceToken();
-                lastSequenceToken.set(sequenceToken);
-            } else if (exception instanceof DataAlreadyAcceptedException) {
-                String sequenceToken = ((DataAlreadyAcceptedException) exception)
-                        .getExpectedSequenceToken();
-                lastSequenceToken.set(sequenceToken);
-            } else {
+            if (!(exception instanceof DataAlreadyAcceptedException)) {
                 isSleep = true;
             }
             if (retryCount >= 1) {
                 if (DEBUG_MODE) {
                     System.err.println("error retryCount:" + retryCount
-                            + "  message:" + exception.getErrorMessage()
+                            + "  message:" + exception.getMessage()
                             + "  class:" + exception.getClass().getName());
                     exception.printStackTrace();
                 }
@@ -305,8 +291,8 @@ public class CloudwatchAppender extends AbstractAppender {
                 putLogEvents(inputLogEvents, retryCount);
             } catch (Exception e) {
                 if (DEBUG_MODE) {
-					logger2.error(" error inserting cloudwatch:", e);
-					e.printStackTrace();
+                    logger2.error(" error inserting cloudwatch:", e);
+                    e.printStackTrace();
                 }
             }
         }
@@ -397,7 +383,7 @@ public class CloudwatchAppender extends AbstractAppender {
             @PluginAttribute(value = "endpoint") String endpoint,
             @PluginAttribute(value = "retryCount", defaultInt = 2) Integer retryCount,
             @PluginAttribute(value = "retrySleepMSec", defaultLong = 5000) Long retrySleepMSec,
-            @PluginAttribute(value = "logsQuotasSizeCheck", defaultBoolean = false) Boolean logsQuotasSizeCheck
+            @PluginAttribute(value = "logsQuotasSizeCheck", defaultBoolean = true) Boolean logsQuotasSizeCheck
     ) {
         return new CloudwatchAppender(name, layout, null, ignoreExceptions, logGroupName, logStreamName,
                 awsAccessKey, awsSecretKey, awsRegion, queueLength, messagesBatchSize, endpoint,
