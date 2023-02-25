@@ -86,37 +86,10 @@ When the AWS credential by environment variables or configuration and credential
 
 When you run the project with this appender added with your AWS credentials, you should see your app log events flowing into the configured CloudWatch group/logStreamName.
 
-The important points
-==========================
-When your web application use in MuleSoft CloudHub using multiple workers, it is recommended highly to define the log stream for <b>each worker</b> as shown below for avoiding the InvalidSequenceToken errors and the total PutLogEvents request of each worker is <b>limited to 5 per second per log stream</b>. It is recommended to define similarly for other multi-server system. 
-
-
-1. log4j2.xml (extract)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;MuleSoft CloudHub  
-   (The worker.id is CloudHub Reserved Property.)
-```  
-<CLOUDW name="CloudW" logGroupName="testGroup"
-          logStreamName="testStreamWorker${sys:worker.id}"
-```
-
-2. log4j2.xml (extract)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Other multi-server system etc
-```  
-<CLOUDW name="CloudW" logGroupName="testGroup"
-          logStreamName="testStreamHost${env:host.id}"
-```
-
-3. CloudWatch Logs Insights sample
-```
-fields @logStream, @timestamp, @message
-| filter @logStream like "testStreamWorker"
-| sort @timestamp desc
-| limit 20
-```
-
 
 ## References
 -  [CloudWatch Logs quotas](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/cloudwatch_limits_cwl.html).
--  [How do I troubleshoot InvalidSequenceToken errors in the Cloudwatch logs?](https://aws.amazon.com/premiumsupport/knowledge-center/cloudwatch-invalid-sequence-token/?nc1=h_ls)
--  [CloudHub Reserved Properties](https://help.mulesoft.com/s/article/CloudHub-Reserved-Properties)
+-  [Amazon CloudWatch Logs removes Log Stream transaction quota and SequenceToken requirement](https://aws.amazon.com/about-aws/whats-new/2023/01/amazon-cloudwatch-logs-log-stream-transaction-quota-sequencetoken-requirement/?nc1=h_ls)
 -  [Environment variables to configure the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html)
 -  [Using the AWS SDK for Java (Working with AWS Credentials)](https://docs.aws.amazon.com/sdk-for-java/v1/developer-guide/credentials.html)
 -  [AWS SDKs and Tools (AWS Region)](https://docs.aws.amazon.com/sdkref/latest/guide/feature-region.html)
