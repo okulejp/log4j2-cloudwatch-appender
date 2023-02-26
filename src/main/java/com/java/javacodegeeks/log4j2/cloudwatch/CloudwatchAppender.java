@@ -3,13 +3,25 @@ package com.java.javacodegeeks.log4j2.cloudwatch;
 import static java.util.Comparator.comparing;
 import static java.util.stream.Collectors.toList;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Formatter;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import com.amazonaws.SdkClientException;
 import org.apache.logging.log4j.LogManager;
@@ -23,8 +35,8 @@ import org.apache.logging.log4j.core.config.plugins.Plugin;
 import org.apache.logging.log4j.core.config.plugins.PluginAttribute;
 import org.apache.logging.log4j.core.config.plugins.PluginElement;
 import org.apache.logging.log4j.core.config.plugins.PluginFactory;
+import org.apache.commons.lang3.tuple.Triple;
 
-import com.amazonaws.AmazonServiceException;
 import com.amazonaws.auth.AWSStaticCredentialsProvider;
 import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.regions.Regions;
@@ -32,12 +44,12 @@ import com.amazonaws.services.logs.AWSLogs;
 import com.amazonaws.services.logs.model.CreateLogGroupRequest;
 import com.amazonaws.services.logs.model.CreateLogStreamRequest;
 import com.amazonaws.services.logs.model.CreateLogStreamResult;
-import com.amazonaws.services.logs.model.DataAlreadyAcceptedException;
 import com.amazonaws.services.logs.model.DescribeLogGroupsRequest;
 import com.amazonaws.services.logs.model.DescribeLogStreamsRequest;
 import com.amazonaws.services.logs.model.InputLogEvent;
 import com.amazonaws.services.logs.model.PutLogEventsRequest;
 import com.amazonaws.client.builder.AwsClientBuilder;
+import org.apache.logging.log4j.util.FilteredObjectInputStream;
 
 @Plugin(name = "CLOUDW", category = "Core", elementType = "appender", printObject = true)
 public class CloudwatchAppender extends AbstractAppender {
@@ -72,9 +84,15 @@ public class CloudwatchAppender extends AbstractAppender {
     private Object sendMessagesLock = new Object();
 
     /**
-     * The queue used to buffer log entries
+     * The queue used to buffer log entries of in-memory
      */
-    private LinkedBlockingQueue<LogEvent> loggingEventsQueue;
+    private LinkedBlockingQueue<LogEvent> inMemoryLoggingEventsQueue;
+
+    /**
+     * The queue used to buffer log entries deserialized from log files
+     * (When log entry is overflowed from the queue, the log entry is serialized into file)
+     */
+    private LinkedBlockingQueue<LogEvent> fileLoggingEventsQueue;
 
     /**
      * the AWS Cloudwatch Logs API client
@@ -127,6 +145,11 @@ public class CloudwatchAppender extends AbstractAppender {
 
     private AtomicBoolean cloudwatchAppenderInitialised = new AtomicBoolean(false);
 
+    private static DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS");
+
+    private volatile File logEventTempDir;
+
+    private volatile List<File> lastLogFiles = null;
 
     private CloudwatchAppender(final String name,
                                final Layout layout,
@@ -156,15 +179,22 @@ public class CloudwatchAppender extends AbstractAppender {
         this.retrySleepMSec = retrySleepMSec;
         this.logsQuotasSizeCheck = logsQuotasSizeCheck;
         this.activateOptions();
+        try {
+            logEventTempDir = Files.createTempDirectory("log4j").toFile();
+        } catch (IOException e) {
+            logger2.error("error create temporary-file directory:", e);
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
     public void append(LogEvent event) {
         if (cloudwatchAppenderInitialised.get()) {
-            if (!loggingEventsQueue.offer(event.toImmutable())) {
+            if (!inMemoryLoggingEventsQueue.offer(event.toImmutable())) {
                 if (DEBUG_MODE) {
                     System.err.println("Cloudwatch Logs for LogGroupName: " + logGroupName + " and LogStreamName: " + logStreamName + " not output because queue is full.");
                 }
+                writeLogEvent(event.toImmutable());
             }
         } else {
             // just do nothing
@@ -189,7 +219,8 @@ public class CloudwatchAppender extends AbstractAppender {
                 }
             }
             this.awsLogsClient = clientBuilder.build();
-            loggingEventsQueue = new LinkedBlockingQueue<>(queueLength);
+            inMemoryLoggingEventsQueue = new LinkedBlockingQueue<>(queueLength);
+            fileLoggingEventsQueue = new LinkedBlockingQueue<>(queueLength);
             try {
                 initializeCloudwatchResources();
                 initCloudwatchDaemon();
@@ -208,10 +239,14 @@ public class CloudwatchAppender extends AbstractAppender {
         Thread t = new Thread(() -> {
             while (true) {
                 try {
-                    if (loggingEventsQueue.size() > 0) {
-                        sendMessages();
-                    }
+                    sendMessagesInMemoryLogEvent();
                     Thread.currentThread().sleep(20L);
+
+                    // processing for log entries overflowed from the queue or not inserted into cloudwatch
+                    if (logEventTempDir.listFiles().length > 0) {
+                        sendMessagesFileLogEvent();
+                        Thread.currentThread().sleep(20L);
+                    }
                 } catch (InterruptedException e) {
                     if (DEBUG_MODE) {
                         e.printStackTrace();
@@ -232,10 +267,6 @@ public class CloudwatchAppender extends AbstractAppender {
                     logEvents);
             awsLogsClient.putLogEvents(putLogEventsRequest);
         } catch (SdkClientException exception) {
-            boolean isSleep = false;
-            if (!(exception instanceof DataAlreadyAcceptedException)) {
-                isSleep = true;
-            }
             if (retryCount >= 1) {
                 if (DEBUG_MODE) {
                     System.err.println("error retryCount:" + retryCount
@@ -243,9 +274,7 @@ public class CloudwatchAppender extends AbstractAppender {
                             + "  class:" + exception.getClass().getName());
                     exception.printStackTrace();
                 }
-                if (isSleep) {
-                    Thread.currentThread().sleep(retrySleepMSec);
-                }
+                Thread.currentThread().sleep(retrySleepMSec);
                 putLogEvents(logEvents, retryCount - 1);
             } else {
                 throw exception;
@@ -253,49 +282,57 @@ public class CloudwatchAppender extends AbstractAppender {
         }
     }
 
-    private void sendMessages() {
-        synchronized (sendMessagesLock) {
-            LogEvent polledLoggingEvent = null;
-            final Layout layout = getLayout();
-            List<InputLogEvent> inputLogEvents = new ArrayList<>();
+    private Triple<Boolean, Integer, List<LogEvent>> sendMessages(LinkedBlockingQueue<LogEvent> loggingEventsQueue) {
+        LogEvent polledLoggingEvent = null;
+        List<LogEvent> polledLoggingEvents = new ArrayList<>();
+        final Layout layout = getLayout();
+        List<InputLogEvent> inputLogEvents = new ArrayList<>();
+        int maxSizeEventCount = 0;
+        boolean isSuccess = false;
 
-            try {
-                int totalSizeByte = 0;
-                while (inputLogEvents.size() < messagesBatchSize && (polledLoggingEvent = loggingEventsQueue.peek()) != null) {
-                    String message = layout == null ?
-                            polledLoggingEvent.getMessage().getFormattedMessage():
-                            new String(layout.toByteArray(polledLoggingEvent), StandardCharsets.UTF_8);
-                    if (logsQuotasSizeCheck) {
-                        byte[] messageBytes = message.getBytes(StandardCharsets.UTF_8);
-                        if (messageBytes.length > EVENT_MAX_SIZE_BYTE - ADDITIONAL_MSG_BYTE_SIZE) {
-                            if (DEBUG_MODE) {
-                                System.err.println("The log message size exceeds CloudWatch Logs quotas event max size.");
-                            }
-                            loggingEventsQueue.poll();
-                            continue;
+        try {
+            int totalSizeByte = 0;
+            while (inputLogEvents.size() < messagesBatchSize && (polledLoggingEvent = loggingEventsQueue.peek()) != null) {
+                String message = layout == null ?
+                        polledLoggingEvent.getMessage().getFormattedMessage():
+                        new String(layout.toByteArray(polledLoggingEvent), StandardCharsets.UTF_8);
+                if (logsQuotasSizeCheck) {
+                    byte[] messageBytes = message.getBytes(StandardCharsets.UTF_8);
+                    if (messageBytes.length > EVENT_MAX_SIZE_BYTE - ADDITIONAL_MSG_BYTE_SIZE) {
+                        if (DEBUG_MODE) {
+                            System.err.println("The log message size exceeds CloudWatch Logs quotas event max size.");
                         }
-                        totalSizeByte += messageBytes.length + ADDITIONAL_MSG_BYTE_SIZE;
-                        if (totalSizeByte > BATCH_MAX_SIZE_BYTE) {
-                            break;
-                        }
+                        maxSizeEventCount ++;
+                        loggingEventsQueue.poll();
+                        continue;
                     }
-                    InputLogEvent inputLogEvent = new InputLogEvent().withTimestamp(polledLoggingEvent.getTimeMillis());
-                    inputLogEvent.setMessage(message);
-                    inputLogEvents.add(inputLogEvent);
-                    loggingEventsQueue.poll();
+                    totalSizeByte += messageBytes.length + ADDITIONAL_MSG_BYTE_SIZE;
+                    if (totalSizeByte > BATCH_MAX_SIZE_BYTE) {
+                        break;
+                    }
                 }
-                if (inputLogEvents.isEmpty()) {
-                    return;
-                }
-                inputLogEvents = inputLogEvents.stream().sorted(comparing(InputLogEvent::getTimestamp)).collect(toList());
-                putLogEvents(inputLogEvents, retryCount);
-            } catch (Exception e) {
-                if (DEBUG_MODE) {
-                    logger2.error(" error inserting cloudwatch:", e);
-                    e.printStackTrace();
-                }
+                InputLogEvent inputLogEvent = new InputLogEvent().withTimestamp(polledLoggingEvent.getTimeMillis());
+                inputLogEvent.setMessage(message);
+                inputLogEvents.add(inputLogEvent);
+                polledLoggingEvents.add(polledLoggingEvent);
+                loggingEventsQueue.poll();
+            }
+            if (inputLogEvents.isEmpty()) {
+                Triple<Boolean, Integer, List<LogEvent>> result = Triple.of(true, maxSizeEventCount, null);
+                return result;
+            }
+            inputLogEvents = inputLogEvents.stream().sorted(comparing(InputLogEvent::getTimestamp)).collect(toList());
+            putLogEvents(inputLogEvents, retryCount);
+            isSuccess = true;
+        } catch (Exception e) {
+            if (DEBUG_MODE) {
+                logger2.error("error inserting cloudwatch:", e);
+                e.printStackTrace();
             }
         }
+        Triple<Boolean, Integer, List<LogEvent>> result =
+            Triple.of(isSuccess, polledLoggingEvents.size() + maxSizeEventCount, polledLoggingEvents);
+        return result;
     }
 
     private void initializeCloudwatchResources() {
@@ -346,6 +383,114 @@ public class CloudwatchAppender extends AbstractAppender {
         return stackTraceBuilder.toString();
     }
 
+    private void sendMessagesInMemoryLogEvent() {
+        if (inMemoryLoggingEventsQueue.isEmpty()) {
+            return;
+        }
+        synchronized (sendMessagesLock) {
+            Triple<Boolean, Integer, List<LogEvent>> result = sendMessages(inMemoryLoggingEventsQueue);
+            if (!result.getLeft()) {
+                for (LogEvent logEvent : result.getRight()) {
+                    writeLogEvent(logEvent);
+                }
+            }
+        }
+    }
+
+    private boolean sendMessagesFileLogEvent() {
+        boolean isSuccess = false;
+        synchronized (sendMessagesLock) {
+            try {
+                if (logEventTempDir.listFiles().length == 0) {
+                    return true;
+                }
+                if (fileLoggingEventsQueue.isEmpty()) {
+                    List<File> logFiles = getLogFiles();
+                    List<LogEvent> logEvents = new ArrayList<>();
+                    for (File logfile : logFiles) {
+                        LogEvent logEvent = readLogEvent(logfile);
+                        if (logEvent != null) {
+                            logEvents.add(logEvent);
+                        }
+                    }
+                    for (LogEvent logEvent : logEvents) {
+                        fileLoggingEventsQueue.add(logEvent);
+                    }
+                    lastLogFiles = logFiles;
+                }
+                Triple<Boolean, Integer, List<LogEvent>> result = sendMessages(fileLoggingEventsQueue);
+                isSuccess = result.getLeft();
+                if (isSuccess) {
+                    int loopCount = lastLogFiles.size();
+                    for (int i = 0; i < loopCount; i++) {
+                        if (!lastLogFiles.get(0).delete()) {
+                            logger2.error("log file not delete. " + lastLogFiles.get(0).getName());
+                            if (DEBUG_MODE) {
+                                System.err.println("log file not delete. " + lastLogFiles.get(0).getName());
+                            }
+                        }
+                        lastLogFiles.remove(0);
+                    }
+                } else {
+                    for (LogEvent logEvent : result.getRight()) {
+                        fileLoggingEventsQueue.add(logEvent);
+                    }
+                }
+            } catch (Exception e) {
+                isSuccess = false;
+                logger2.error("error inserting cloudwatch from log files:", e);
+                if (DEBUG_MODE) {
+                    System.err.println("error inserting cloudwatch from log files");
+                    e.printStackTrace();
+                }
+            }
+            return isSuccess;
+        }
+    }
+
+    public void writeLogEvent(LogEvent event) {
+        try {
+            String dateTimeStr = ZonedDateTime.now().format(formatter);
+            Path filePath = Files.createTempFile(logEventTempDir.toPath(), dateTimeStr, ".log");
+            try (FileOutputStream fos = new FileOutputStream(filePath.toFile());
+                 ObjectOutputStream oos = new ObjectOutputStream(fos);
+            ) {
+                oos.writeObject(event);
+            }
+        } catch (Exception e) {
+            logger2.error("error output LogEvent to file:", e);
+            if (DEBUG_MODE) {
+                System.err.println("error output LogEvent to file");
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private LogEvent readLogEvent(File file) {
+        LogEvent logEvent = null;
+        try (FileInputStream fis = new FileInputStream(file);
+             FilteredObjectInputStream fois = new FilteredObjectInputStream(fis)) {
+            logEvent = (LogEvent) fois.readObject();
+        } catch (Exception e) {
+            logger2.error("error read LogEvent from file:", e);
+            if (DEBUG_MODE) {
+                System.err.println("error read LogEvent from file");
+                e.printStackTrace();
+            }
+        }
+        return logEvent;
+    }
+
+    private List<File> getLogFiles() {
+        List<File> listFiles = null;
+        listFiles = Arrays.asList(logEventTempDir.listFiles());
+        listFiles = listFiles.stream().sorted(Comparator.comparing(File::getName)).collect(Collectors.toList());
+        if (messagesBatchSize < listFiles.size()) {
+            listFiles.subList(messagesBatchSize, listFiles.size()).clear();
+        }
+        return listFiles;
+    }
+
     @Override
     public void start() {
         super.start();
@@ -354,8 +499,14 @@ public class CloudwatchAppender extends AbstractAppender {
     @Override
     public void stop() {
         super.stop();
-        while (loggingEventsQueue != null && !loggingEventsQueue.isEmpty()) {
-            this.sendMessages();
+        while (inMemoryLoggingEventsQueue != null && !inMemoryLoggingEventsQueue.isEmpty()) {
+            this.sendMessagesInMemoryLogEvent();
+        }
+        while (logEventTempDir.listFiles().length != 0) {
+            boolean isSuccess = this.sendMessagesFileLogEvent();
+            if (!isSuccess) {
+                return;
+            }
         }
     }
 
